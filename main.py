@@ -34,6 +34,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed: str) -> bool:
+    if not hashed:
+        return False
     return pwd_context.verify(password, hashed)
 
 
@@ -70,7 +72,7 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
         user = collection("user").find_one({"_id": sess.get("user_id")})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-    return {"_id": str(user["_id"]), "email": user["email"], "name": user.get("name", "")}
+    return {"_id": str(user["_id"]), "email": user.get("email", ""), "name": user.get("name", "")}
 
 
 # -----------------------
@@ -185,7 +187,8 @@ def register(data: RegisterIn):
         "email": data.email,
         "name": data.name,
         "password_hash": hash_password(data.password),
-        "created_at": datetime.now(timezone.utc)
+        "created_at": datetime.now(timezone.utc),
+        "role": "user"
     }
     res = users.insert_one(user_doc)
     token = create_session(res.inserted_id)["token"]
@@ -196,10 +199,28 @@ def register(data: RegisterIn):
 def login(data: LoginIn):
     users = collection("user")
     user = users.find_one({"email": data.email})
-    if not user or not verify_password(data.password, user["password_hash"]):
+    if not user or not verify_password(data.password, user.get("password_hash")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = create_session(user["_id"])['token']
-    return {"token": token, "user": {"id": str(user["_id"]), "email": user["email"], "name": user.get("name", "")}}
+    return {"token": token, "user": {"id": str(user["_id"]), "email": user.get("email", ""), "name": user.get("name", "")}}
+
+
+@app.post("/auth/guest")
+def guest_login():
+    """Create a quick guest session with a throwaway account to reduce friction."""
+    users = collection("user")
+    guest_id = f"guest-{uuid.uuid4().hex[:8]}"
+    email = f"{guest_id}@guest.local"
+    user_doc = {
+        "email": email,
+        "name": "Guest",
+        "password_hash": None,
+        "created_at": datetime.now(timezone.utc),
+        "role": "guest"
+    }
+    res = users.insert_one(user_doc)
+    token = create_session(res.inserted_id)["token"]
+    return {"token": token, "user": {"id": str(res.inserted_id), "email": email, "name": "Guest"}}
 
 
 @app.post("/notes/upload")
@@ -287,10 +308,8 @@ def list_notes(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 @app.get("/quiz/{note_id}")
 def get_quiz(note_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    note = collection("note").find_one({"_id": db.get_collection("note")._Document__codec_options.document_class.objectid_class(note_id)}) if False else collection("note").find_one({"_id": note_id})
-    # The environment stores _id as string by default; above guard keeps compatibility
+    note = collection("note").find_one({"_id": note_id})
     if not note or note.get("user_id") != current_user["_id"]:
-        # try fetching by string id
         note = collection("note").find_one({"_id": note_id})
         if not note or note.get("user_id") != current_user["_id"]:
             raise HTTPException(status_code=404, detail="Note not found")
